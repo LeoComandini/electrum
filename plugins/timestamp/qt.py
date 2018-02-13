@@ -430,12 +430,12 @@ class Plugin(BasePlugin):
         local_height = network.get_local_height()
         txid_pending = set([f.txid for f in self.proofs_storage_file.incomplete_proofs if f.status == "pending"])
         for txid in txid_pending:
-            is_tx_verified = True  # use a nicer design?
             try:
                 tx_height = wallet.verified_tx[txid][0]
+                is_upgradable = (local_height - tx_height >= default_blocks_until_confirmed)
             except KeyError:  # FIXME: check that this is the right error
-                is_tx_verified = False
-            if (local_height - tx_height >= default_blocks_until_confirmed) and is_tx_verified:
+                is_upgradable = False
+            if is_upgradable:
                 # txid -> block
                 t = proof_from_txid_to_block(txid, tx_height, network)
                 for f in self.proofs_storage_file.incomplete_proofs:
