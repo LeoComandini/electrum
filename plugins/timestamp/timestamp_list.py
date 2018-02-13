@@ -13,7 +13,7 @@ class TimestampList(MyTreeWidget):
     filter_columns = [0, 1]  # Key, Value
 
     def __init__(self, parent, db):
-        MyTreeWidget.__init__(self, parent, self.create_menu, [_('Path'), _('Status')], 0, [0])
+        MyTreeWidget.__init__(self, parent, self.create_menu, [_('Path'), _('Status'), _('Aggregated Merkle Tip'), _('TXID'), _('Block')], 0, [0])
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSortingEnabled(True)
 
@@ -29,8 +29,14 @@ class TimestampList(MyTreeWidget):
         current_path = item.data(0, Qt.UserRole) if item else None
         self.clear()
         for d in self.db:  # FIXME: order in the desired way
-            path, status = d["path"], d["status"]
-            item = QTreeWidgetItem([path, status])
+            path, status, mtt, txid, block = d["path"], d["status"], d["mtt"], d["txid"], d["block"]
+            if mtt is not None:
+                mtt = d["mtt"][:8] + "..."
+            if txid is not None:
+                txid = d["txid"][:8] + "..."
+            if d["block"] is not None:
+                block = str(block)
+            item = QTreeWidgetItem([path, status, mtt, txid, block])
             item.setData(0, Qt.UserRole, path)
             self.addTopLevelItem(item)
             if path == current_path:
