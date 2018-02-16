@@ -18,6 +18,13 @@ from functools import partial
 import requests
 import json
 import base64
+import hashlib
+
+from electrum.util import bh2u
+from electrum.bitcoin import public_key_from_private_key, regenerate_key, MySigningKey
+from ecdsa.curves import SECP256k1
+from ecdsa.rfc6979 import generate_k
+from ecdsa.util import sigencode_der, sigdecode_der
 
 # PB1:
 # what if the signature is in the witness? (e.g. in s2c)
@@ -415,7 +422,6 @@ class Plugin(BasePlugin):
                 self.proofs_storage_calendar.incomplete_proofs = [p for p in temp if p.status != "broadcasted"]
         self.update_storage(clean_memory=True)
 
-
     def upgrade_timestamps_block(self, wallet, network):  # pass the param in this way?
         """upgrade the timestamp until block"""
         # should these be the argument for this function?
@@ -459,7 +465,6 @@ class Plugin(BasePlugin):
             self.proofs_storage_file.read_json("file")
             self.proofs_storage_calendar.read_json("calendar")
 
-
     def timestamp_op_return(self, tx):
         """Aggregate timestamps and insert them in an op_return output
 
@@ -470,6 +475,93 @@ class Plugin(BasePlugin):
         script = bytes.fromhex("6a") + len(commit).to_bytes(1, "big") + commit
         tx.add_outputs([(2, script.hex(), 0)])
 
+    def sign_to_contract(self, tx, wallet, commit_s2c):
+        """Sign a transaction including a commitment in the signature
+
+        Only one signature needs to contain the commitment, the 1st signature of the 1st output will be chosen
+        (j=0, i=0); The other inputs are signed in the standard way
+
+        To avoid extra complications the signing phase adhere to the standard signing procedure, still the signature
+        containing the commitment point include some unavoidable extra steps
+
+        While the pivot point *must* be stored in this phase, (ephemeral pubkey x, append, prepend) are returned just to
+        make things easier
+        """
+
+        # FIXME: this should happen in separate thread, as the standard signatures are made.
+        # I postpone this since I am not very practical with this things
+        password = ""  # should be passed by the function
+
+        # extract the data corresponding to the 1st input (i=0) and its 1st signature (j=0)
+        i = 0  # selecting the first input is a lazy choice, is there a better criterion?
+        txin_s2c = tx.inputs()[i]
+        keystore = wallet.keystore
+        keystore.check_password(password)  # decode the xprv
+        keypairs = keystore.get_tx_derivations(tx)  # keypairs are the keys corresponding to the inputs of the txl
+        for k, v in keypairs.items():
+            keypairs[k] = keystore.get_private_key(v, password)  # FIXME: picking all the private key is a lazy solution
+        pubkeys, x_pubkeys = tx.get_sorted_pubkeys(txin_s2c)
+        j = 0  # the tx input may contain more than 1 pubkey, the 1st is chosen
+        x_pubkey = x_pubkeys[j]
+        sec, compressed = keypairs.get(x_pubkey)
+        pubkey = public_key_from_private_key(sec, compressed)
+        pkey = regenerate_key(sec)
+        secexp = pkey.secret
+        private_key = MySigningKey.from_secret_exponent(secexp, curve=SECP256k1)
+        public_key = private_key.get_verifying_key()
+        pre_hash = Hash(bytes.fromhex(tx.serialize_preimage(i)))  # what this "i" means?
+
+        # expanded signing phase to include the secp256k1 commitment
+        k = generate_k(order=private_key.curve.generator.order(), secexp=secexp, hash_func=hashlib.sha256,
+                       data=pre_hash)
+        pivot_pt = k * SECP256k1.generator
+        pivot_pt_encoded = bytearray(pivot_pt.x().to_bytes(33, "big"))
+        pivot_pt_encoded[0] = 2 if pivot_pt.y() % 2 == 0 else 3
+        hasher = hashlib.sha256()
+        hasher.update(pivot_pt_encoded)
+        hasher.update(commit_s2c)
+        tweak = int.from_bytes(hasher.digest(), "big")  # tweak = h(pivot||commit_s2c)
+        k_tweaked = (k + tweak) % SECP256k1.order  # should some checks be performed?
+        sig = private_key.sign_digest(pre_hash, sigencode=sigencode_der, k=k_tweaked)
+        # PB: what should be the dimension of ephemeral pubkey?
+        # apoelstra return a 32 bytes key but it could be eventually smaller due to DER encoding.
+        # for now I assume that what is returned by OpSecp256k1Commitment uses the minimum amount of bytes required.
+        # if in the future the byte size of first part of the signature will be fixed (e.g. Schnorr with 32 bytes)
+        # prepend will simply include some more b'\x00'
+        ephemeral_pubkey_x = sig[4:(4 + sig[3])]
+        while ephemeral_pubkey_x[0] == 0:
+            ephemeral_pubkey_x = ephemeral_pubkey_x[1:]
+        assert ephemeral_pubkey_x == (k_tweaked * SECP256k1.generator).x().to_bytes(32, "big")
+        # FIXME: 1 time out of 256 the RHS is < 32 bytes hence the preious fails
+
+        # conclude the signature in the standard way
+        assert public_key.verify_digest(sig, pre_hash, sigdecode=sigdecode_der)
+        txin_s2c['signatures'][j] = bh2u(sig) + '01'
+        txin_s2c['pubkeys'][j] = pubkey  # needed for fd keys # ?
+        tx._inputs[i] = txin_s2c
+        tx.raw = tx.serialize()
+
+        # sign normally the other inputs
+        wallet.sign_transaction(tx, password)  # this should not overwrite the signature just made
+
+        # 3. return the info useful for the ots proof: pivot_pt, [tx = prepend || ephemeral_pubkey_x || append]
+        i = tx.raw.find(ephemeral_pubkey_x.hex())
+        prepend = x(tx.raw[:i])
+        append = x(tx.raw[i + len(ephemeral_pubkey_x.hex()):])
+        # return pivot_pt_encoded, prepend, ephemeral_pubkey, append
+        print("pivot_pt", bytes(pivot_pt_encoded).hex())
+        print("prepend", prepend.hex())
+        print("eph_pub", ephemeral_pubkey_x.hex())
+        print("append", append.hex())
+        # the ots proof (s2c_commit -> txid) will be something like:
+        # Timestamp: s2c_commit
+        # OpPrepend pivot_pt
+        # OpSecp256k1Commitment
+        # OpPrepend prepend
+        # OpAppend append
+        # OpSha256
+        # OpSha256  ((w)txid in little endian)
+
     # dialog functions
 
     @hook
@@ -478,7 +570,13 @@ class Plugin(BasePlugin):
         b.clicked.connect(lambda: self.add_op_return_commitment(d))
         d.buttons.insert(0, b)
 
-        b = d.buttons[2]  # broadcast button
+        commit_s2c = hashlib.sha256(b'Hello world!').digest()
+        d.timestamp_button = b = QPushButton(_("S2C"))
+        b.clicked.connect(lambda: self.sign_to_contract(d.tx, d.wallet, commit_s2c))
+        d.buttons.insert(1, b)
+
+        b = d.buttons[3]  # broadcast button
+        # b = d.buttons[2]  # broadcast button
         b.clicked.connect(lambda: self.upgrade_timestamps_txid(d.tx))
 
     def add_op_return_commitment(self, d):
