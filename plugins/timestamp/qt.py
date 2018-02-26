@@ -161,7 +161,9 @@ class CalendarData:
         if isinstance(self.tip, bytes) and len(self.tip) == 32:
             self.timestamp = Timestamp(self.tip)
         else:
-            raise ValueError("Unexpected data from the calendar")
+            self.tip = bytes.fromhex("0" * 64)
+            self.timestamp = Timestamp(self.tip)
+            # raise ValueError("Unexpected data from the calendar")
 
     def send_to_calendar(self):
         # create ots, send ots to calendar
