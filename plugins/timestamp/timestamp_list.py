@@ -7,18 +7,21 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import (
     QAbstractItemView, QFileDialog, QMenu, QTreeWidgetItem)
 from electrum_gui.qt.util import MyTreeWidget
+from electrum.util import timestamp_to_datetime
+from electrum_gui.qt.util import time
 
 
 class TimestampList(MyTreeWidget):
     filter_columns = [0, 1]  # Key, Value
 
     def __init__(self, parent, db):
-        MyTreeWidget.__init__(self, parent, self.create_menu, [_('Path'), _('Status'), _('Aggregated Merkle Tip'), _('TXID'), _('Block')], 0, [0])
+        MyTreeWidget.__init__(self, parent, self.create_menu, [_('Path'), _('Date'), _('Aggregated Tip'), _('TXID'), _('Block')], 0, [0])
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSortingEnabled(True)
 
         self.db = db
-        self.on_update()
+        if db:
+            self.on_update()
 
     def create_menu(self, position):
         menu = QMenu()
@@ -28,16 +31,36 @@ class TimestampList(MyTreeWidget):
         item = self.currentItem()
         current_path = item.data(0, Qt.UserRole) if item else None
         self.clear()
-        for d in self.db:  # FIXME: order in the desired way
-            path, status, mtt, txid, block = d["path"], d["status"], d["mtt"], d["txid"], d["block"]
-            if mtt is not None:
-                mtt = d["mtt"][:8] + "..."
-            if txid is not None:
-                txid = d["txid"][:8] + "..."
-            if d["block"] is not None:
-                block = str(block)
-            item = QTreeWidgetItem([path, status, mtt, txid, block])
+        for d in ordered_db(self.db):
+            path = d["path"]
+            date = d["date"] if d["date"] else "To be defined"
+            status = d["status"]
+            agt = d["agt"][:8] if d["agt"] else d["agt"]
+            txid = d["txid"][:8] if d["txid"] else d["txid"]
+            block = str(d["block"]) if d["block"] else d["block"]
+            item = QTreeWidgetItem([path, date, agt, txid, block])
+            if status == "tracked":
+                pic = "status_connected_proxy.png"
+            elif status == "aggregated":
+                pic = "status_lagging.png"
+            elif status == "pending":
+                pic = "clock1.png"
+            else:  # confirmed
+                pic = "confirmed.png"
+            icon = QIcon(":icons/" + pic)
+            item.setIcon(0, icon)
+            item.setToolTip(0, status)
             item.setData(0, Qt.UserRole, path)
             self.addTopLevelItem(item)
             if path == current_path:
                 self.setCurrentItem(item)
+        self.sortItems(4, 1)
+
+
+def ordered_db(db):
+    status = ["tracked", "aggregated", "pending", "complete"]
+    odb = []
+    for s in status:
+        odb += sorted([d for d in db if d["status"] == s], key=lambda b: b["path"])
+    return odb
+
