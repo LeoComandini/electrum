@@ -18,14 +18,12 @@ class TimestampList(MyTreeWidget):
         MyTreeWidget.__init__(self, parent, self.create_menu, [_('Path'), _('Date'), _('Aggregated Tip'), _('TXID'), _('Block')], 0, [0])
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSortingEnabled(True)
-
         self.db = db
         if db:
             self.on_update()
 
-    def create_menu(self, position):
-        menu = QMenu()
-        selected = self.selectedItems()
+    def create_menu(self):
+        pass
 
     def on_update(self):
         item = self.currentItem()
@@ -54,13 +52,13 @@ class TimestampList(MyTreeWidget):
             self.addTopLevelItem(item)
             if path == current_path:
                 self.setCurrentItem(item)
-        self.sortItems(4, 1)
 
 
 def ordered_db(db):
-    status = ["tracked", "aggregated", "pending", "complete"]
     odb = []
-    for s in status:
+    odb += sorted([d for d in db if d["status"] == "complete"], key=lambda b: b["date"])
+    for s in ["pending", "aggregated", "tracked"]:
         odb += sorted([d for d in db if d["status"] == s], key=lambda b: b["path"])
     return odb
+
 
