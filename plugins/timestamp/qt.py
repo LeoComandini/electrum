@@ -1,13 +1,13 @@
 from electrum.i18n import _
 from electrum.plugins import BasePlugin, hook
 from electrum_gui.qt import EnterButton
-from electrum_gui.qt.util import WindowModalDialog, OkButton, Buttons
+from electrum_gui.qt.util import WindowModalDialog
 from electrum_gui.qt.transaction_dialog import show_transaction
 from electrum.util import timestamp_to_datetime
 
 from .timestamp_list import TimestampList
 
-from PyQt5.QtWidgets import (QVBoxLayout, QGridLayout, QPushButton, QLabel, QFileDialog)
+from PyQt5.QtWidgets import (QVBoxLayout, QGridLayout, QPushButton, QFileDialog, QMessageBox)
 
 from bitcoin.core import x, lx
 from opentimestamps.core.timestamp import Timestamp, DetachedTimestampFile, make_merkle_tree, cat_sha256d
@@ -199,6 +199,11 @@ class ProofsStorage:
         self.write_json()
         return True
 
+    def remove_path(self, path):
+        self.incomplete_proofs = [i for i in self.incomplete_proofs if i.path != path]
+        self.db = [d for d in self.db if d["path"] != path]
+        self.write_json()
+
 
 class Plugin(BasePlugin):
 
@@ -303,6 +308,18 @@ class Plugin(BasePlugin):
         b.clicked.connect(lambda: self.upgrade_timestamps_tx(d.tx))
 
     def add_op_return_commitment(self, d):
+        fee_before = d.tx.get_fee() / d.tx.estimated_size()
+        fee_after = d.tx.get_fee() / (d.tx.estimated_size() + 43)
+        question = _("Including a timestamp increase the transaction size of 43 bytes.\n" +
+                     " - Expected fee: " + str(fee_before)[:6] + " sat/vbyte\n" +
+                     " - Actual fee: " + str(fee_after)[:6] + " sat/vbyte\n" +
+                     "A lower fee may slow down confirmation time.\n"
+                     "Note: you can timestamp for free using the public calendars, " +
+                     "see https://opentimestamps.org\n\n" +
+                     "Are you sure to include a timestamp in your transaction?")
+        answer = QMessageBox.question(d, _("Transaction size increase"), question, QMessageBox.Yes, QMessageBox.No)
+        if answer == QMessageBox.No:
+            return
         self.timestamp_op_return(d.tx)
         d.close()
         show_transaction(d.tx, d.main_window)
@@ -310,7 +327,7 @@ class Plugin(BasePlugin):
     @hook
     def transaction_dialog_update(self, d):
         tp = [i for i in self.proofs_storage_file.incomplete_proofs if i.status in ["tracked", "aggregated"]]
-        if len(tp) == 0 or any([o[0] == 2 for o in d.tx.outputs()]):
+        if len(tp) == 0 or any([o[0] == 2 for o in d.tx.outputs()]) or d.tx.is_complete():
             d.timestamp_button.setDisabled(True)
 
     @hook
@@ -322,7 +339,7 @@ class Plugin(BasePlugin):
         d = WindowModalDialog(window, _("Timestamps"))
         d.setMinimumSize(900, 100)
         vbox = QVBoxLayout(d)
-        self.timestamp_list = TimestampList(window, self.proofs_storage_file.db)
+        self.timestamp_list = TimestampList(window, self.proofs_storage_file)
         vbox.addWidget(self.timestamp_list)
         button_add_file = EnterButton(_('Add new file'), partial(self.open_file, window))
         button_upgrade = EnterButton(_('Upgrade'), partial(self.upgrade_dialog, window))
@@ -339,15 +356,10 @@ class Plugin(BasePlugin):
         if self.track_new_file(filename):
             self.timestamp_list.on_update()
         else:
-            self.duplicate_path_dialog(window)
-
-    def duplicate_path_dialog(self, window):
-        # FIXME: is this a good way?
-        d = WindowModalDialog(window, _("Duplicate file"))
-        vbox = QVBoxLayout(d)
-        vbox.addWidget(QLabel("Duplicate file cannot be added to the timestamp storage"))
-        vbox.addLayout(Buttons(OkButton(d)))
-        d.exec_()
+            question = _("Duplicate files cannot be added to the timestamp storage.")
+            answer = QMessageBox.question(window, _("Duplicate file"), question, QMessageBox.Ok)
+            if answer == QMessageBox.Ok:
+                return
 
     def upgrade_dialog(self, window):
         self.upgrade_timestamps_txs(window.wallet)  # useful only if the tx is broadcasted without the plugin
