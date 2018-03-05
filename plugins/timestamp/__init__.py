@@ -1,9 +1,8 @@
 from electrum.i18n import _
 
 fullname = 'Timestamp'
-description = '%s\n%s' % (_("Plugin to include the timestamps of some data inside your transaction."),
-                          _("The final timestamp will include the timestamps of your data and the timestamps " +
-                            "collected by some aggregators (calendar services). \nTo perform this operations it is " +
-                            "used the OpenTimestamps standard."))
+description = '%s\n%s' % (_("Timestamp your files with your transactions using OpenTimestamps."),
+                          _("Note: you can timestamp for free using the public calendars, " +
+                            "while including a timestamp in your transaction has a cost."))
 
 available_for = ['qt']

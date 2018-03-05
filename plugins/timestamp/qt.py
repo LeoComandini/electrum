@@ -1,39 +1,45 @@
-from PyQt5.QtGui import *
-from electrum.plugins import BasePlugin, hook
 from electrum.i18n import _
-from PyQt5.QtWidgets import (QHBoxLayout, QVBoxLayout, QGridLayout, QPushButton, QLabel, QLineEdit, QFileDialog)
+from electrum.plugins import BasePlugin, hook
 from electrum_gui.qt import EnterButton
-from electrum_gui.qt.util import ThreadedButton, Buttons
-from electrum_gui.qt.util import WindowModalDialog, OkButton, CloseButton, HelpButton, QRadioButton
+from electrum_gui.qt.util import WindowModalDialog, OkButton, Buttons
 from electrum_gui.qt.transaction_dialog import show_transaction
-from electrum_gui.qt.main_window import StatusBarButton
 from electrum.util import timestamp_to_datetime
 
 from .timestamp_list import TimestampList
 
-from bitcoin.core import *
-from opentimestamps.core.timestamp import *
+from PyQt5.QtWidgets import (QVBoxLayout, QGridLayout, QPushButton, QLabel, QFileDialog)
+
+from bitcoin.core import x, lx
+from opentimestamps.core.timestamp import Timestamp, DetachedTimestampFile, make_merkle_tree, cat_sha256d
+from opentimestamps.core.op import Op, OpAppend, OpPrepend, OpSHA256
 from opentimestamps.core.serialize import BytesSerializationContext, BytesDeserializationContext
 from opentimestamps.core.notary import UnknownAttestation, BitcoinBlockHeaderAttestation
-from opentimestamps.timestamp import *
+from opentimestamps.timestamp import nonce_timestamp
 
 from functools import partial
-import requests
 import json
 import base64
 
 # TODO: external timestamping for calendars
 # TODO: include s2c (segwit txs imply extra work for the electrum server)
 
+# FIXME: if a tx is too big it must be decomposed in smaller parts
 # FIXME: if a tx gets stuck (low fee) the corresponding timestamp can never be completed,
 #        add a function to erase pending timestamps?
 # FIXME: if the tx fails the timestamp is upgraded (until the txid)
 
 # REM: A non-segwit tx can be malleated by someone who relays it.
-#      If The related timestamps will be not upgradable
+#      If it happens the related timestamps will be not upgradable
 
 # REM: There is no easy way to timestamp raw data directly.
 #      A possible solution is to include those data in a file.
+
+# REM: If a reorg of more than `default_blocks_until_confirmed` (6) blocks happens some timestamps may become invalid
+
+
+json_path_file = "db_file.json"
+default_blocks_until_confirmed = 0  # set to 0 for faster testing, should be 6
+default_folder = "/home/leonardo/PycharmProjects/plugin6/File2Timestamp"
 
 
 # ____ util ________________________________________________________________________
@@ -194,12 +200,6 @@ class ProofsStorage:
         return True
 
 
-#json_path_file = "/home/leonardo/PycharmProjects/plugin6/electrum/db_file.json"
-json_path_file = ":db_file.json"
-default_blocks_until_confirmed = 0  # set to 0 for faster testing, should be 6
-default_folder = "/home/leonardo/PycharmProjects/plugin6/File2Timestamp"
-
-
 class Plugin(BasePlugin):
 
     def __init__(self, parent, config, name):
@@ -242,20 +242,21 @@ class Plugin(BasePlugin):
             if category == 2:  # agt -> txid
                 agt = script[4:]  # drop "6a20" op_return and op_pushdata(32)
                 tx_raw = tx.serialize(witness=False)
-                i = tx_raw.find(agt)
-                prepend = x(tx_raw[:i])
-                append = x(tx_raw[i + len(agt):])
-                t_agt = Timestamp(x(agt))
-                t = t_agt.ops.add(OpPrepend(prepend))
-                t = t.ops.add(OpAppend(append))
-                t = t.ops.add(OpSHA256())
-                t = t.ops.add(OpSHA256())  # txid in little endian
-                for f in self.proofs_storage_file.incomplete_proofs:
-                    tf = roll_timestamp(f.detached_timestamp.timestamp)
-                    if tf.msg == x(agt):
-                        tf.merge(t_agt)
-                        f.status = "pending"
-                        f.txid = t.msg[::-1].hex()
+                if len(x(tx_raw)) <= Op.MAX_MSG_LENGTH:
+                    i = tx_raw.find(agt)
+                    prepend = x(tx_raw[:i])
+                    append = x(tx_raw[i + len(agt):])
+                    t_agt = Timestamp(x(agt))
+                    t = t_agt.ops.add(OpPrepend(prepend))
+                    t = t.ops.add(OpAppend(append))
+                    t = t.ops.add(OpSHA256())
+                    t = t.ops.add(OpSHA256())  # txid in little endian
+                    for f in self.proofs_storage_file.incomplete_proofs:
+                        tf = roll_timestamp(f.detached_timestamp.timestamp)
+                        if tf.msg == x(agt):
+                            tf.merge(t_agt)
+                            f.status = "pending"
+                            f.txid = t.msg[::-1].hex()
         self.update_storage()
 
     def upgrade_timestamps_block(self, wallet, network):
@@ -319,7 +320,7 @@ class Plugin(BasePlugin):
 
     def timestamp_dialog(self, window):
         d = WindowModalDialog(window, _("Timestamps"))
-        d.setMinimumSize(500, 100)
+        d.setMinimumSize(900, 100)
         vbox = QVBoxLayout(d)
         self.timestamp_list = TimestampList(window, self.proofs_storage_file.db)
         vbox.addWidget(self.timestamp_list)
