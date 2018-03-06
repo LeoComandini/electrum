@@ -22,16 +22,15 @@ class TimestampList(MyTreeWidget):
             return
         path = item.data(0, Qt.UserRole)
         menu = QMenu()
-        menu.addAction(_("Remove"), lambda: self.remove(path))
+        menu.addAction(_("Remove…"), lambda: self.remove(path))
         menu.exec_(self.viewport().mapToGlobal(position))
 
     def remove(self, path):
         question = _("Are you sure you want to remove this timestamp?")
-        answer = QMessageBox.question(self.parent, _("Please confirm"), question, QMessageBox.Yes, QMessageBox.No)
-        if answer == QMessageBox.No:
-            return
-        self.proofs_storage.remove_path(path)
-        self.on_update()
+        answer = QMessageBox.question(self.parent, _("Please confirm"), question, QMessageBox.Ok, QMessageBox.Cancel)
+        if answer == QMessageBox.Ok:
+            self.proofs_storage.remove_path(path)
+            self.on_update()
 
     def on_update(self):
         item = self.currentItem()

@@ -4,29 +4,26 @@ from electrum_gui.qt import EnterButton
 from electrum_gui.qt.util import WindowModalDialog
 from electrum_gui.qt.transaction_dialog import show_transaction
 from electrum.util import timestamp_to_datetime
-
 from .timestamp_list import TimestampList
 
-from PyQt5.QtWidgets import (QVBoxLayout, QGridLayout, QPushButton, QFileDialog, QMessageBox)
-
-from bitcoin.core import x, lx
-from opentimestamps.core.timestamp import Timestamp, DetachedTimestampFile, make_merkle_tree, cat_sha256d
-from opentimestamps.core.op import Op, OpAppend, OpPrepend, OpSHA256
-from opentimestamps.core.serialize import BytesSerializationContext, BytesDeserializationContext
-from opentimestamps.core.notary import UnknownAttestation, BitcoinBlockHeaderAttestation
-from opentimestamps.timestamp import nonce_timestamp
-
+from PyQt5.QtWidgets import QVBoxLayout, QGridLayout, QPushButton, QFileDialog, QMessageBox
 from functools import partial
 import json
 import base64
+import binascii
+
+try:
+    from opentimestamps.core.timestamp import Timestamp, DetachedTimestampFile, make_merkle_tree, cat_sha256d
+    from opentimestamps.core.op import Op, OpAppend, OpPrepend, OpSHA256
+    from opentimestamps.core.serialize import BytesSerializationContext, BytesDeserializationContext
+    from opentimestamps.core.notary import UnknownAttestation, BitcoinBlockHeaderAttestation
+    from opentimestamps.timestamp import nonce_timestamp
+    ots_imported = True
+except ImportError:
+    ots_imported = False
 
 # TODO: external timestamping for calendars
 # TODO: include s2c (segwit txs imply extra work for the electrum server)
-
-# FIXME: if a tx is too big it must be decomposed in smaller parts
-# FIXME: if a tx gets stuck (low fee) the corresponding timestamp can never be completed,
-#        add a function to erase pending timestamps?
-# FIXME: if the tx fails the timestamp is upgraded (until the txid)
 
 # REM: A non-segwit tx can be malleated by someone who relays it.
 #      If it happens the related timestamps will be not upgradable
@@ -38,11 +35,27 @@ import base64
 
 
 json_path_file = "db_file.json"
-default_blocks_until_confirmed = 0  # set to 0 for faster testing, should be 6
-default_folder = "/home/leonardo/PycharmProjects/plugin6/File2Timestamp"
+default_blocks_until_confirmed = 6
+default_folder = ""
 
 
-# ____ util ________________________________________________________________________
+# util
+
+
+def x(h):
+    return binascii.unhexlify(h.encode('utf-8'))
+
+
+def lx(h):
+    return binascii.unhexlify(h.encode('utf-8'))[::-1]
+
+
+def bytes_to_b64string(b):
+    return base64.b64encode(b).decode('utf-8')
+
+
+def b64string_to_bytes(s):
+    return base64.b64decode(s.encode('utf-8'))
 
 
 def proof_from_txid_to_block(txid, height, network):
@@ -67,16 +80,12 @@ def roll_timestamp(t):
 
 
 def pre_serialize(t):
-    """Add an UnknownAttestation if the final timestamp has not one"""
-
     ft = roll_timestamp(t)
     if len(ft.attestations) == 0:
         ft.attestations.add(UnknownAttestation(b'incompl.', b''))
 
 
 def post_deserialize(t):
-    """Erase UnknownAttestation(s) after deserialization"""
-
     ft = roll_timestamp(t)
     fa = ft.attestations.copy()
     for a in fa:
@@ -84,15 +93,7 @@ def post_deserialize(t):
             ft.attestations.remove(a)
 
 
-def bytes_to_b64string(b):
-    return base64.b64encode(b).decode('utf-8')
-
-
-def b64string_to_bytes(s):
-    return base64.b64decode(s.encode('utf-8'))
-
-
-# ____ data containers ______________________________________________________________
+# data containers
 
 
 class FileData:
@@ -205,12 +206,18 @@ class ProofsStorage:
         self.write_json()
 
 
+# plugin
+
+
 class Plugin(BasePlugin):
 
     def __init__(self, parent, config, name):
         BasePlugin.__init__(self, parent, config, name)
         self.proofs_storage_file = ProofsStorage(json_path_file)
         self.timestamp_list = None
+
+    def is_available(self):
+        return ots_imported
 
     def track_new_file(self, path):
         f = FileData()
@@ -236,6 +243,12 @@ class Plugin(BasePlugin):
                     f.agt = roll_timestamp(f.detached_timestamp.timestamp).msg
             self.update_storage()
         return t.msg
+
+    def timestamp_op_return(self, tx):
+        commit = self.aggregate_timestamps()
+        if commit:
+            script = bytes.fromhex("6a") + len(commit).to_bytes(1, "big") + commit
+            tx.add_outputs([(2, script.hex(), 0)])
 
     def upgrade_timestamps_txs(self, wallet):
         for txid, tx in wallet.transactions.items():
@@ -291,14 +304,6 @@ class Plugin(BasePlugin):
         self.proofs_storage_file.write_json()
         self.proofs_storage_file.read_json()  # drop timestamps common structure to stay more general
 
-    def timestamp_op_return(self, tx):
-        commit = self.aggregate_timestamps()
-        if commit:
-            script = bytes.fromhex("6a") + len(commit).to_bytes(1, "big") + commit
-            tx.add_outputs([(2, script.hex(), 0)])
-
-    # dialog functions
-
     @hook
     def transaction_dialog(self, d):
         d.timestamp_button = t = QPushButton(_("Timestamp"))
@@ -317,7 +322,7 @@ class Plugin(BasePlugin):
                      "Note: you can timestamp for free using the public calendars, " +
                      "see https://opentimestamps.org\n\n" +
                      "Are you sure to include a timestamp in your transaction?")
-        answer = QMessageBox.question(d, _("Transaction size increase"), question, QMessageBox.Yes, QMessageBox.No)
+        answer = QMessageBox.question(d, _("Transaction size increase"), question, QMessageBox.Ok, QMessageBox.Cancel)
         if answer == QMessageBox.No:
             return
         self.timestamp_op_return(d.tx)
@@ -333,7 +338,7 @@ class Plugin(BasePlugin):
     @hook
     def init_menubar_tools(self, window, tools_menu):
         tools_menu.addSeparator()
-        tools_menu.addAction(_("&Timestamps"), partial(self.timestamp_dialog, window))
+        tools_menu.addAction(_("&Timestamps…"), partial(self.timestamp_dialog, window))
 
     def timestamp_dialog(self, window):
         d = WindowModalDialog(window, _("Timestamps"))
@@ -342,7 +347,7 @@ class Plugin(BasePlugin):
         self.timestamp_list = TimestampList(window, self.proofs_storage_file)
         vbox.addWidget(self.timestamp_list)
         button_add_file = EnterButton(_('Add new file'), partial(self.open_file, window))
-        button_upgrade = EnterButton(_('Upgrade'), partial(self.upgrade_dialog, window))
+        button_upgrade = EnterButton(_('Upgrade'), partial(self.do_upgrade, window))
         grid = QGridLayout()
         grid.addWidget(button_add_file, 0, 0)
         grid.addWidget(button_upgrade, 0, 1)
@@ -361,7 +366,7 @@ class Plugin(BasePlugin):
             if answer == QMessageBox.Ok:
                 return
 
-    def upgrade_dialog(self, window):
+    def do_upgrade(self, window):
         self.upgrade_timestamps_txs(window.wallet)  # useful only if the tx is broadcasted without the plugin
         self.upgrade_timestamps_block(window.wallet, window.network)
         self.timestamp_list.db = self.proofs_storage_file.db
