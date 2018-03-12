@@ -37,7 +37,7 @@ except ImportError:
 
 json_path_file = "db_file.json"
 default_blocks_until_confirmed = 6
-default_folder = os.path.expanduser("~user")
+default_folder = os.path.expanduser("~")
 
 
 # util
@@ -295,7 +295,7 @@ class Plugin(BasePlugin):
                         tf.merge(t)
                         f.status = "complete"
                         f.block = tx_height
-                        f.date = str(timestamp_to_datetime(timestamp))
+                        f.date = timestamp_to_datetime(timestamp).strftime("%-d %B %Y")
                         f.write_ots()
                         # f.detached_timestamp = None
         self.update_storage()
